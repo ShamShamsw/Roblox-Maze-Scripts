@@ -1,0 +1,55 @@
+# Required Functionality
+
+1. The script should reference a designated floor activation pad.
+
+2. When a player steps on the pad, the trap should activate.
+
+3. The pad should begin flashing between two configurable colors to warn nearby players.
+
+4. The flashing should occur for a configurable warning period before the ceiling falls.
+
+5. After the warning period, the spike ceiling should drop downward toward a designated endpoint.
+
+6. The ceiling should move smoothly and visibly.
+
+7. If a player is caught underneath the falling ceiling or touches the active spikes, they should receive configurable damage or instant death.
+
+8. The ceiling should remain at its lowest position for a configurable amount of time.
+
+9. After the delay, the ceiling should return to its original position.
+
+10. The activation pad should stop flashing and return to its original appearance once the trap resets.
+
+11. The trap should have an activation cooldown.
+
+12. Multiple players stepping on the pad during an active sequence must not restart or duplicate the trap sequence.
+
+## Required Changes you may have to make
+
+• Activation pad.
+• Ceiling model (Or empty space above).
+• Starting position.
+• Falling distance.
+• Movement speed.
+• Warning duration.
+• Flashing interval.
+• Warning color.
+• Normal pad color.
+• Damage amount or Instant-death.
+• Time spent at the bottom.
+• Reset speed.
+• Activation cooldown.
+
+# Please Notice
+## Server Security
+
+Use server-controlled movement to ensure all players see the same animation.
+
+Preserve the ceiling model’s orientation and move all connected parts together.
+
+Make sure the ceiling does not fall through the floor or move beyond its configured endpoint.
+
+All activation detection, animations, damage, and trap resets must happen on the server. (Do not use LocalScripts or client-controlled RemoteEvents.)
+
+# Script
+
