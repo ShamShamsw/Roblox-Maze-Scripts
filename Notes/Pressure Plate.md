@@ -35,6 +35,3 @@ All block detection and door movement must be controlled by the server. Do not t
 ## Connecting The Scripts
 
 Configure the pressure plate, movable block, and door in Roblox Studio. The script should be easy to reuse for multiple doors by changing its configuration.
-
-# Script
-
