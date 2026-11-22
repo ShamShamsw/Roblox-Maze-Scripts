@@ -20,5 +20,3 @@
 The basic error handling makes the script reusable across multiple enemy NPCs.
 
 Do not allow clients to modify enemy behavior  (As well as handle multiple players)
-
-# Script
