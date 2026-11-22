@@ -33,7 +33,3 @@ All detection, validation, and enemy creation must happen on the server. Do not 
 ## Connecting The Scripts
 
 Place the Script in Roblox Studio; instructions for the required objects and for configuring the enemy template and spawn area are included. Follow every step.
-
-# Script
-
-
