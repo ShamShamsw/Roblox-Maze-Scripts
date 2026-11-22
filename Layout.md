@@ -5,28 +5,34 @@ I wanted to include a section that would go over the layout and folder structure
 ## Layout
 
 ServiceScriptService
-|- EnemySystem (Folder)
-|  |- EnemyAreaConfig (ModuleScript)
-|  |- EnemyManager    (ModuleScript)
-|  |- ManagerArea1    (ModuleScript)
-|  |_ EnemyManagerRunner (Script)
-|- PushBlockDoors        (Script)
-|- SpawnPlate            (Script)
-|- SpikeCeilingTrap      (Script)
-|_ SpikeWallTrap         (Script)
+├── EnemySystem
+│   ├── EnemyAreaConfig (ModuleScript)
+│   ├── EnemyManager (ModuleScript)
+│   ├── ManagerArea1 (ModuleScript)
+│   └── EnemyManagerRunner (Script)
+├── PushBlockDoors (Script)
+├── SpawnPlate (Script)
+├── SpikeCeilingTrap (Script)
+└── SpikeWallTrap (Script)
 
 ServerStorage
-|- Maze1Enemy  (Model: Humanoid + HumanoidRootPart + PrimaryPart + Script)
-|_ Maze2Enemy ...
+├── Maze1Enemy
+│   ├── Humanoid
+│   ├── HumanoidRootPart
+│   ├── PrimaryPart
+│   └── Enemy AI Script
+└── Maze2Enemy
+    └── ...
 
 Workspace
-|- Maze1SpawnPoints (Include parts or a part for the spawn area; folder recommended for multiple)
-|- PressurePlate       (Script)
-|- KillCube            (Script)
-|- GreenPlate          (Script the cube, not the plates, so it is easier to set up)
-|- SpawnPlate
-|- SpikeCeiling
-|_ SpikeWwall
+├── Maze1SpawnPoints
+│   └── Spawn parts or a folder containing multiple parts
+├── PressurePlate (Script)
+├── KillCube (Script)
+├── GreenPlate (Script)
+├── SpawnPlate
+├── SpikeCeiling
+└── SpikeWall
 
 ## How the pieces operate
 
