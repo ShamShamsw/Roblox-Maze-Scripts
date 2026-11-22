@@ -42,5 +42,3 @@ The server must independently verify that the correct block has left the designa
 ## Connecting The Scripts
 
 Configure the pressure plate, movable block, and door in Roblox Studio. The script should be easy to reuse for multiple doors by changing its configuration.
-
-# Script
