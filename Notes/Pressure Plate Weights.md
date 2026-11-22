@@ -46,5 +46,3 @@ Include protection against duplicate deaths, duplicate respawns, and exceeding t
 ## Server Security
 
 The server must handle all collision detection, enemy elimination, and replacement decisions. (Do not use LocalScripts or client-triggered RemoteEvents.)
-
-# Script
