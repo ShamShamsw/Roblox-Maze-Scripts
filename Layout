@@ -1,8 +1,8 @@
-# How To Structure These Concepts
+1. How To Structure These Concepts
 
 I wanted to include a section that would go over the layout and folder structure I would design if I was creating this game.
 
-## Layout
+2. Layout
 
 ServiceScriptService
 ├── EnemySystem
@@ -34,7 +34,7 @@ Workspace
 ├── SpikeCeiling
 └── SpikeWall
 
-## How the pieces operate
+3. How the pieces operate
 
 The Manager scripts handle the counting system for all mazes. Add a maze by adding a block in EnemyAreaConfig.
 
@@ -44,14 +44,14 @@ KillCube will kill an enemy, wait 5 seconds, and then ask the manager to check t
 
 Everything else is an independent mechanism.
 
-## Creating an enemy
+4. Creating an enemy
 
 1. Model with "Humanoid" and "HumanoidRootPart", and set the PrimaryPart. (You can use premade workshop options)
 2. Parts unanchored.
 3. Script for the Enemy AI placed inside the model.
 4. Stored in "ServerStorage", with the name matching the config.
 
-## Notes
+5. Notes
 
 * Certain parts of your game must be anchored to be properly utilized, like pressure plates, walls, traps, etc. Moving required models use "PivotTo", so all parts are anchored.
 * Touched is unreliable, so make sure spike hazards use server-side bounding-box checks.
