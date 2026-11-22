@@ -86,5 +86,3 @@ Each enemy should maintain its own target, chase timer, and pathfinding state. (
 All target detection, movement decisions, pathfinding, and enemy behavior must run on the server.
 
 Ensure the server retains network ownership of enemy NPC movement where appropriate. (Do not use LocalScripts or RemoteEvents to control enemy AI.)
-
-# Script
