@@ -50,6 +50,3 @@ Preserve the ceiling model’s orientation and move all connected parts together
 Make sure the ceiling does not fall through the floor or move beyond its configured endpoint.
 
 All activation detection, animations, damage, and trap resets must happen on the server. (Do not use LocalScripts or client-controlled RemoteEvents.)
-
-# Script
-
