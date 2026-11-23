@@ -1,5 +1,5 @@
 -- EnemyAreaConfig
--- Copy this Script into ServerScriptService, and name it "EnemyAreaConfig".
+-- Copy this Script into ServerScriptService and name it "EnemyAreaConfig".
 -- Place the enemy system files in a Folder for organization:
 
 -- ServerScriptService
