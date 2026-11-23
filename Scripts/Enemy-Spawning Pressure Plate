@@ -1,0 +1,219 @@
+        -- Enemy-Spawning Pressure Plate
+        -- When a PLAyer steps on the plate, one enemy is cloned from ServerStorage and placed at a random position inside a spawn area in Workspace.
+        --- NPCs and objects never trigger it.
+
+        -- Workflow
+        -- 1. In Workspace, create/choose a Part to be the PRESSURE PLATE. 
+        -- Make sure CanTouch = true and Achored = true.
+
+        -- 2. Insert THIS Script INSIDE that plate Part (script.Parent = plate).
+
+        -- 3. Build your enemy as a Model (needs a Humanoid, a HumanoidRootPart, and a PrimaryPart)
+        -- Name it, then drag it into ServerStorage.
+        -- Put the same name in CONFIG.EnemyTemplateName.
+        
+        -- 4. In Workspace, create a part that marks the spawn AREA (a flat part on the floor works just fine).
+        -- Make it anchored.
+        -- Set CanCollide=false and Transparency=1 if you want it invisible.
+        -- Name it exactly as Config.SpawnAreaName.
+        -- Enemies appear at random spots on top of it.
+
+        -- 5. Edit the CONFIG table below.
+
+        -- 6. RECOMMENDED: Share limits with the Enemy Manager; set CONFIG.ManagerAreaName to an area name from EnemyAreaConfig (for example, "Maze1").
+        -- Then enemies from this plate count towards that maze and can never push past its maximum.
+
+        -- SECURITY
+        -- Everything here is server-side.
+        -- There are no RemoteEvents and NO LocalScripts, so clients cannot activate the plate or spawn enemies.
+
+local Players             = game:GetService("Players")
+local ServerStorage       = game:GetService("ServerStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+        --- Configuration (Change these to fit this specific plate)
+
+local CONFIG = {
+        -- Name of the enemy Model inside ServerStorage.
+  EnemyTemplateName = "PlateEnemy",
+
+        -- Name of the Part in the Workspace that defines where enemies spawn.
+  SpawnAreaName = "PlateSpawnArea",
+
+        -- Maximum number of enemies from THIS plate alive at the same time.
+  MaxEnemiesFromPlate = 3,
+
+        -- Seconds before the plate can fire again.
+        -- Also stops repeated spawning while a player stands still on the plate.
+  ActivationCooldown = 5,
+
+        -- true = plate can be used again and again (after cooldown).
+        -- false = plate works only ONCE per server.
+  CanActivateMultipleTimes = true,
+
+        -- Should the plate change look when activated?
+  ChangeAppearanceWhenActivated = true,
+  ActivatedColor = Color3.fromRGB(255,255,255),
+
+        -- OPTIONAL: name of an area in EnemyAreaConfig, or nil for standalone
+  ManagerAreaName = nil, -- e.g. "Maze1"
+}
+
+        -- Setup & Validation
+
+        -- The plate is the Part this sits inside.
+local plate = script.Parent
+if not plate:IsA("BasePart") then
+  warn("[SpawnPlate] Script must be placed inside a Part. Disabling.")
+  return
+end
+
+        -- Remember: the original color so we can restore it.
+local originalColor = plate.Color
+
+        -- Try to load the optional enemy manager.
+local EnemyManager = nil
+if CONFIG.ManagerAreaName then
+  local ok, result = pcall(function()
+        -- If anything is missing, the indexing below errors and pcall catches it.
+    return require(ServerScriptService:WaitForChild("EnemySystem",5):WaitForChild("Enemy", 5))
+  end)
+  if ok then
+    EnemyManager = result
+  else
+    warn("[SpawnPlate] ManagerAreaName set but EnemyManager not found. Running standalone.")
+  end
+end
+
+        -- State
+local isOnCooldown = false        -- true while the plate is cooling down
+local hasBeenActivated = false    -- true once an enemy has successfully spawned
+local aliveFromPlate = 0          -- living enemies created by THIS plate
+
+        -- SPAWNING
+
+        -- Tries to spawn one enemy. Returns true if one was created.
+local function trySpawnEnemy()
+        -- 1) Verify the template exists.
+  local template = ServerStorage:FindFirstChild(CONFIG.EnemyTemplateName)
+  if not template or not template:IsA("Model") then
+    warn("[SpawnPlate] Enemy template '" .. CONFIG.EnemyTemplateName .. "' not found in ServerStorage (must be a Model).")
+      return false
+  end
+
+        -- 2) Verify the spawn area exists (searches all of Workspace).
+  local spawnArea = workspace:FindFIrstChild(CONFIG.SpawnAreaName, true)
+  if not spawnArea or not spawnArea:IsA("BasePart") then
+    warn("[SpawnPlate] Spawn area Part '" .. CONFIG.SpawnAreaName .. "' not found in Workspace.")
+    return false
+  end
+
+        -- 3) Respect this plate's own maximum.
+  if aliveFromPlate >= CONFIG.MaxEnemiesFromPlate then
+    return false
+  end
+
+        -- 4) Respect the maze's maximum if the manager is connected
+  if EnemyManager and not EnemyManager.CanSpawn(CONFIG.ManagerAreaName) then
+    return false
+  end
+
+        -- 5) Clone the enemy and check that it has a Humanoid.
+  local enemy = template:Clone()
+  local humanoid = enemy:FindFirstChildOfClass("Humanoid")
+  if not humanoid then
+    warn("[SpawnPlate] Template has no Humanoid.")
+    enemy:Destroy()
+    return false
+  end
+
+        -- 6) Random position inside the spawn area's boundaries.
+  local _, extents = enemy:GetBoundingBox()
+  local rx = (math.random() - 0.5) * spawnArea.Size.X
+  local rz = (math.random() - 0.5) * spawnArea.Size.Zf
+  local worldPos = spawnArea.CFrame:PointToWorldSpace(
+    Vector3.new(rx, spawnArea.Size.Y / 2 + extents.Y / 2 + 1, rz)
+  )
+  enemy:PivotTo(CFrame.new(worldPos))
+  enemy.Parent = workspace
+
+        -- 7) Tell the manager about it (if connected).
+  if EnemyManager then
+    local registered = EnemyManager.RegisterEnemy(enemy, CONFIG.ManagerAreaName)
+    if not registered then
+      enemy:Destroy()  -- manager said no (area full)
+      return false
+    end
+  end
+
+        -- 8) Keep NPC physics on the server.
+  local root = enemy:FindFirstCHild("HumanoidRootPart")
+  if root then
+    pcall(function() root:SetNetworkOwner(nil) end)
+    return false
+  end
+
+        -- 9) Track how many of THIS plate's enemies are alive.
+  aliveFromPlate += 1
+  local counted = true
+  local function release()
+    if counted then
+      countd = false
+      aliveFromPlate -= 1
+    end
+  end
+  humanoid.Died:Once(release)
+  enemy.AncestryChanged:Connect(function(_, newParent)
+    if newParent == nil then
+      release()
+    end
+  end
+
+  return true
+end
+
+        -- TOUCH DETECTION
+
+local function onTouched(hit)
+        -- Quick exits (these run first so repeated Touched events are cheap).
+  if isOnCooldown then return end
+  if hasBeenActivated and not CONFIG.CanActivateMultipleTimes then return end
+
+        -- Find the character model that owns the touching part.
+        -- (works for legs, arms, accessories, tools, etc.)
+  local character = hit:FindFirstAncestorOfClass("Model")
+  if not character then return end
+
+        -- ONLY real playrs count; NPCs have no Player object.
+  local player = Players:GetPlayerFromCharacter(character)
+  if not player then return end
+
+        -- Ignore players who are already dead.
+  local humanoid = character:FindFirstChildOfClass("Humanoid")
+  if not humanoid or humanoid.Health <= 0 then return end
+
+        -- LOCK IMMEDIATELY (before any waiting) so several players touching
+        -- in the same moment cannot cause duplicate activations.
+  isOnCooldown = true
+
+        -- try to spawn.
+  local spawned = trySpawnEnemy()
+  if spawned then
+    hasBeenActivated = true
+    if CONFIG.ChangeAppearanceWhenActivated then
+      plate.Color = CONFIG.ActivatedColor
+    end
+  end
+
+        -- End the cooldown later (non-blocking).
+  task.delay(CONFIG.ActivationCooldown, function()
+    isOnCooldown = false
+        -- Restore the color only if the plate can be used again.
+    if CONFIG.CanActivateMultipleTimes and CONFIG.ChangeAppearanceWhenActivated then
+      plate.Color = originalColor
+    end
+  end)
+end
+
+plate.Touched:Connect(onTouched)
+  
