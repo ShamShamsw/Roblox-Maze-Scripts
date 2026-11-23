@@ -1,0 +1,15 @@
+        -- EnemyManagerRunner (script)
+        -- Starts the EnemyManager. ModuleScripts do nothing until something requires them, so this small Script is powerful.
+        
+        -- ServerScriptService
+        -- └─ EnemySystem (Folder)
+        --    ├─ EnemyAreaConfig (Script)
+        --    ├─ EnemyManager (ModuleScript)
+        --    └─ EnemyManagerRunner (Script)
+        
+        -- Notice: (RunContext = Legacy or Server. NEVER a LocalScript.)
+        -- Load the manager that sits in the same folder.
+local EnemyManager = require(script.Parent:waitForChild("EnemyManager"))
+
+        -- Fill each area to its minimum and begin the periodic verification.
+EnemyManager.Start()
