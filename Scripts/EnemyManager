@@ -1,0 +1,366 @@
+        -- EnemyManager (ModuleScript)
+        -- Copy this Script into ServerScriptService and name it "EnemyManager".
+        -- Place the enemy system files in a Folder for organization:
+        
+        -- WHAT THIS DOES
+        -- Keeps a separate enemy list for every area in EnemyAreaConfig
+        -- Counts LIVING enemies per area (dead / destroyed / removed ones are dropped automatically).
+        -- Spawns enemies only inside the area's spawn part / spawn points.
+        -- Refuses to spawn above MaxEnemies (hard cap).
+        -- Refills the area up to MinEnemies when it falls below it.
+        -- Re-verifies every area every Config.CheckIntervals seconds.
+        -- Exposes a small API so OTHER scripts (pressure plate, kill cube) use THIS manager instead of making their own counters.
+        --  * There is only ONE counting system, so nothing can conflict.
+        
+        -- ServerScriptService
+        -- └─ EnemySystem (Folder)
+        --    ├─ EnemyAreaConfig (Script)
+        --    ├─ EnemyManager (ModuleScript) <-- THIS SCRIPT
+        --    └─ EnemyManagerRunner (Script)
+
+        -- SECURITY
+        
+        -- This module lives on the server and uses NO RemoteEvents, so a client can never change counts or trigger spawns.
+        
+        -- PUBLIC API (Call from other SERVER scripts)
+        --   EnemyManager.Start()                              Begin spawning + loop
+        --   EnemyManager.GetLivingCount(areaName)             number
+        --   EnemyManager.CanSpawn(areaName)                   boolean
+        --   EnemyManager.SpawnEnemy(areaName)                 model | nil, reason
+        --   EnemyManager.RegisterEnemy(model, areaName)       bolean, reason
+        --   EnemyManager.Replenish(areaName)                  number spawned
+        --   EnemyManager.ScheduleReplacementCheck(area, sec)  delayed Replenish
+        --   EnemyManager.GetEnemyArea(model)                  areaName | nil
+
+        -- Roblox services needed
+local ServerStorage      = game:GetService("ServerStorage")
+local CollectionService  = game:GetService("CollectionService")
+Local Debris             = game:GetService("Debris")
+
+        -- Load the configuration ModuleScript that sits next to this one.
+local Config = require(script.Parent:WaitForChild("EnemyAreaConfig"))
+
+        -- The table this module returns. Because ModuleScripts are cached, every script that requires this gets the same table and the SMA enemy lists (shared state, no duplicates).
+local EnemyManager = {}
+
+        -- areas[areaName] = {}
+        --   Config = <the config block>,
+        --   Min = number, Max = number,     validatd copies
+        --   Enemies = { [enemyModel] = true, ...},
+        --   SpawnContainer = instance or nil,
+        -- }
+
+local areas = {}
+
+        -- Prevents Start() fro mrunnign twice.
+local started = false
+
+        -- Helper functions
+
+        -- Prints with a prefix so messages are easy to find in the Output.
+local function log(...)
+  print("[EnemyManager]", ...)
+end
+
+local function warnMsg(...)
+  warn("[EnemyManager]", ...)
+end
+
+        -- Returns true only if the enemy still exists in the Workspace and its Humanoid still has health.
+        -- This is what I would define as "living".
+local function isEnemyAlive(enemy)
+  if not enemy or not enemy.Parent then
+    return false
+  end
+  if not enemy:IsDescendantOf(workspace) then
+    return false
+  end
+  local humanoid = enemy:FindFirstChildOfClass("Humanoid")
+  if not humanoid or humanoid.Health <= 0 then
+    return false
+  end
+  return true
+end
+folder.Parent = workspace
+        -- Find (or create) a Workspace folder to keep spawned enemies organized.
+local function getEnemyFolder()
+  local folder = workspace:FindFirstChild("SpawnedEnemies")
+  if not folder then
+    folder = Instance.new("Folder")
+    folder.Name = "SpawnedEnemies"
+    folder.Parent = workspace
+  end
+  return folder
+end
+
+
+        -- Build the per-area data from the config (runs once when loaded)
+
+local function initializeAreas()
+  for areaName, cfg in pairs(Config.Areas) do
+    local minCount = math.max(0, math.floor(cfg.MinEnemies or 0))
+    local maxCount = math.max(1, math.floor(cfg.MaxEnemies or 1))
+        -- Clamp values so a typo in the config cannot break the system
+
+        -- Minimum can never be higher than maximum.
+    if minCount > maxCount then
+      warnMSG(areaName, "has MinEnemies > MaxEnemies. Lowering Min to", MaxCount)
+      minCount = maxCount
+    end
+
+    areas[areaName] = {
+      Config = cfg,
+      Min = minCount,
+      Max = maxCount,
+      Enemies = {},          -- this area's OWN enemy list
+      SpawnContainer = nil,  -- cached spawn part/folder
+    }
+  end
+end
+
+        -- Registering an Enemy so it counts toward and area
+
+local function registerEnemy(enemy, areaName)
+  local area = areas[areaName]
+
+        -- Add the enemy to THIS area's list only.
+  area.Enemies[enemy] = true
+
+        -- Label the enemy with its area and the enemy tag so other scripts (kill cube etc.) can identify it and know its home area.
+  enemy:SetAttribute(Config.AreaAttribute, areaName)
+  CollectionService:AddTag(enemy, Config.EnemyTag)
+
+        -- When the Humanoid dies, remove it from the list right away so the count updates instantly.
+    local humanoid = enemy:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        -- :Once() means this runs a single time (no duplicate handling).
+      humanoid.Died:Once(function()
+        area.Enemies[enemy] = nil
+        -- Clean the body up after a short delay
+        Debris:AddItem(enemy, Config.CorpseCleanupDelay)
+    end)
+  end
+
+      -- If the enemy is destroyed or moved out of the workspace by any other script, remove it from the list too.
+  enemy.AncestryChanged:Connect(function()
+    if not enemy:IsDescendantOf(workspace) then
+      area.Enemies[enemy] = nil
+    end
+  end)
+end
+
+        -- Choosing where to spawn
+
+        -- Returns a CFrame inside the area's spawn location, or nil + reason.
+local function pickSpawnCFrame(area, enemy)
+        -- Look up (and cache) the spawn container in Workspace.
+  local container = area.SpawnContainer
+        -- 'true' = search recursively through all of workspace.
+      container = workspace:FindFirstChild(area.Config.SpawnLocationName, true)
+    area.SpawnContainer = container
+  end
+  if not container then
+    return nil, "spawn location '" .. tostring(area.Config.SpawnLocationName) .. "' not found in Workspace"
+  end
+
+        -- Find how tall the enemy is so we place it above the ground and not inside it.
+  local _, extents = enemy:GetBoundingBox()
+  local heightOffset = extents.Y / 2 + 1
+
+        -- CASE A: the container is one part -> random point inside it.
+  if container:IsA("BasePart") then
+        -- Random offsets across the part's width and depth.
+    local rx = (math.random() - 0.5) * container.Size.X
+    local rz = (math.random() - 0.5) * container.Size.Z
+        -- also works if the part's local space is converted to world space, so it also works if the part is rotated.
+    local worldPOS = container.Cframe:PointToWorldSPace(
+      Vector3.new(rx, container.Size.Y / 2 + heightOffset, rz)
+    )
+    return CFrame.new(worldPos)
+  end
+
+        -- CASE B: a folder/Model of spawn point parts -> pick one at random.
+  local points = {}
+  for _, descendant in ipairs(container:GetDescendants()) do
+    if descendant:IsA("BasePart") then
+      table.insert(points, descendant)
+    end
+  end
+  if #points == 0 then
+    return nil, "spawn location contains no Parts"
+  end
+  local point = points[math.random(1, #points)]
+  return CFrame.new(point.Position + Vector3.new(0, point.Size.Y / 2 + heightOffset, 0))
+end
+
+-- Public API
+
+-- returns how many LIVING enemies belong to the area.
+-- Also prunes dead/removal enemines from the list while it counts.
+function EnemyManager.GetLivingCount(areaName)
+  local area = areas[areaName]
+  if not area then
+    return 0
+  end
+  local count = 0
+  for enemy in pairs(area.Enemies) do
+    if isEnemyAlive(enemy) then
+      count += 1
+    else
+        -- Setting an existing key to nil while looping is safe.
+      area.Enemies[enemy] = nil
+    end
+  end
+  return count
+end
+
+        -- True if the area exists ad is below its maximum.
+function EnemyManager.CanSpawn(areaName)
+  local area = areas[areaName]
+  return area ~= nil and EnemyManager.GetLivingCount(areaName) < area.Max
+end
+
+        -- Reads which area an enemy belongs to (set when it was registered).
+function EnemyManager.GetEnemyArea(enemy)
+  if not enemy then
+    return nil
+  end
+  return enemy:GetAttribute(Config.AreaAttribute)
+end
+
+        -- Spawns one enemy in the area. Never exceeds the maximum.
+        -- Returns the enemy model, or nil plus a reason string.
+        -- NOTE: no wait/yield between the count check and the registration, so two scripts cannot both "squeeze in" past the max.
+function EnemyManager.SpawnEnemy(areaName)
+  local area = areas[areaName]
+  if not area then
+    return nil, "unknown area '" .. tostring(areaName) .. "'"
+  end
+
+        -- HARD CAP check.
+
+  if EnemyManager.GetLivingCount(areaName) >= area.Max then
+    return nil, "area already at maximum"
+  end
+
+        -- find the template model in ServerStorage.
+  local template = ServerStorage:FindFirstChild(area.Config.ENemyTemplateName)
+  if not template or not template:IsA("Model") then
+    return nil, "template '" .. tostring(area.Config.EnemyTemplatename) .. "' missing from ServerStorage (must be a Model)"
+  end
+        -- Clone it and make sure it is a valid NPC.
+  local enemy = template:Clone()
+  if not enemy:FindFirstChildOfClass("Humanoid") then
+    enemy:destroy()
+    return nil, "template has no Humanoid"
+  end
+
+        -- Place it, label it before parenting (so the script inside enemy can read the attribute when it starts), then parent it.
+  enemy:PivotTo(spawnCFrame)
+  enemy:SetAttribute(Config.AreaAttribute, areaName)
+  enemy.Parent = getEnemyFolder()
+
+        -- Count it toward this area.
+  registerEnemy(enemy, areaName)
+
+        -- Keep physics on the server so exploitrs cannot control the NPC
+  local root = enemy:FindFirstChild("HumanoidRootPart")
+  if root then
+    pcall(function()
+      root:SetNetworkOwner(nil)
+    end)
+
+    return enemy
+end
+
+        -- Registers an enemy that was created by ANOTHER script (for example, a pressure plate) so it counts towards the area.
+        -- Refuses if the area is already full.
+
+function EnemyManager.registerEnemy(enemy, areaName)
+  local area = areas[areaName]
+  if not area then
+    return false, "unknown area"
+end
+if area.Enemies[enemy] then
+  return true -- already registered, nothing to doe
+end
+if EnemyManager.GetLivingCount(areaName) >= area.Max then
+  return false, "area already at maximum"
+  end
+  registerEnemy(enemy, areaName)
+  return true
+end
+
+        -- Spawn enemies until the area reaches its MINIMUM (never beyond).
+        -- Safe to call as often as you like: if the minimum is already met, it does nothing, so duplicate calls cannot cause duplicate spawns.
+function EnemyManager.Replenish(areaName)
+  local area = areas[areaName]
+  if not area then
+    return 0
+  end
+
+  local spawned = 0
+        -- 'attempts' is a safety net against any infinite loop.
+  local attempts = 0
+  while EnemyManager.GetLivingCount(areaName) < area.Min and attempts < area.Max do
+    attempts += 1
+    local enemy, reason = EnemyManager.SpawnEnemy(areaName)
+    if not enemy then
+      warnMsg("Could not spawn in", areaName .. ":", reason)
+      break -- stop; the periodic check will try again later
+    end
+    spawned += 1
+  end
+  return spawned
+end
+
+        -- Waits 'delaySounds' and THEN checks whether the area needs a replacement.
+        -- Used by the kill cube (5 second delay).
+function EnemyManager.ScheduleReplacementCheck(areaName, delaySeconds)
+  task.delay(delaySeconds or 0, function()
+    EnemyManager.Replenish(areaName)
+  end)
+end
+
+        -- Starts the system: first fill, then the periodic verification loop.
+function EnemyManager.Start()
+  if started then
+    return
+  end
+  started = true
+
+        -- Initial fill up to each area's minimum. 
+  for areaName, area in pairs(areas) do
+    if area.Config.InitialSpawn ~= false then
+      EnemyManager.Replenish(areaName)
+    end
+  end
+
+        -- Periodic verification: recovers from enemies removed in odd ways or from earlier failed spawns.
+
+  task.spawn(function()
+    while true do
+      task.wait(Config.CheckInterval)
+      for areaName in pairs(areas) do
+        -- pcall so one broken area never stops the loop.
+        local ok, err = pcall(EnemyManager.Replenish, areaName)
+        if not ok then
+          warnMsg("Periodic check error in", areaName .. ":", err)
+        end
+      end
+    endf
+  end)
+
+  log("Started. Managing areas:", table.concat((function()
+    local names = {}
+    for name in pairs(areas) do table.insert(names, name) end
+    return names
+  end)(), ", "))
+end
+
+        -- Builds the area data as soon as the module is required
+initializeAreas()
+
+return EnemyManager
+
+  
