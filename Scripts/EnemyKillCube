@@ -1,0 +1,170 @@
+        -- Enemy Kill Cube
+        -- Kills or damages enemies that touch the cube.
+        -- Never harms players.
+        -- Identifies enemies using the CollectionService tag "Enemy".
+        -- Locks each enemy during elimination to prevent repeated processing.
+        -- After an enemy dies, requests a delayed replacement check from the ENEMY MANAGER.
+        -- The manager checks that enemy's own maze and decides whether to spawn a replacement.
+        -- Minimum and maximum limits are managed in ONE place to avoid duplicate respawns
+        -- and counting conflicts.
+
+        -- Workflow
+        -- 1. Install the Enemy Manager system FIRST (files 01a, 01b, and 01c).
+
+        -- 2. In Workspace, create the KILL CUBE (a Part or Model of Parts).
+        -- Set Anchored = true and CanTouch = true for its parts.
+
+        -- 3. Insert THIS Script INSIDE the cube Part or Model (script.Parent = cube).
+
+        -- 4. Edit the CONFIG table below.
+
+        -- 5. Enemies spawned by the manager are tagged automatically.
+        -- For hand-placed enemies, apply the "Enemy" tag using the Tag Editor.
+        -- Also register them using EnemyManager.RegisterEnemy(model, "MazeName").
+
+        -- Without an Enemy Manager
+        -- The cube can still kill enemies, but it cannot request replacements.
+        -- A replacement system needs:
+        -- 1. A per-maze list of living enemies.
+        -- 2. A stored maze name for each enemy.
+        -- 3. Minimum and maximum enemy limits for each maze.
+        -- 4. One function that spawns only below the minimum and never exceeds the maximum.
+        -- EnemyManager (script 1) provides this system.
+
+        -- SECURITY
+        -- All touch detection, elimination, and replacement decisions run on the SERVER.
+        -- There are NO LocalScripts or RemoteEvents.
+
+local Players             = game:GetService("Players")
+local CollectionService   = game:GetService("CollectionService")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+        -- Configuration (Change these to fit this specific cube)
+
+local CONFIG = {
+        -- Tag that identifies an enemy Model.
+        -- Must match Config.EnemyTag in EnemyAreaConfig.
+  EnemyTag = "Enemy",
+
+        -- true = instant death on touch.
+        -- false = applies DamageAmount on touch.
+  InstantKill = true,
+  DamageAmount = 25,        -- used only when InstantKill = false
+  DamageCooldown = 0.5,     -- seconds between damage applications per enemy
+
+        -- Seconds to wait after an enemy dies before checking
+        -- whether a replacement is needed.
+  RespawnDelay = 5,
+
+        -- Attribute that stores the enemy's home maze.
+        -- Must match Config.AreaAttribute in EnemyAreaConfig.
+  AreaAttributeName = "EnemyAreaName",
+
+        -- Fallback maze name if the enemy has no maze attribute.
+        -- nil = no replacement.
+  FallbackAreaName = nil, -- e.g. "Maze1"
+}
+
+        -- Enemy Manager Connection
+        -- Connects to the manager as the single source of truth.
+
+local EnemyManager = nil
+do
+  local ok, result = pcall(function()
+    return require(ServerScriptService:WaitForChild("EnemySystem", 10):WaitForChild("EnemyManager", 10))
+  end)
+  if ok then
+    EnemyManager = result
+  else
+    warn("[KillCube] EnemyManager not found. Enemies will be killed but NOT replaced.")
+  end
+end
+
+        -- Helper Functions
+
+        -- Searches upward from the touching part for a Model with the enemy tag.
+        -- Returns nil if no tagged enemy Model is found.
+local function findEnemyModel(part)
+  local current = part
+  while current and current ~= workspace do
+    if current:IsA("Model") and CollectionService:HasTag(current, CONFIG.EnemyTag) then
+      return current
+    end
+    current = current.Parent
+  end
+  return nil
+end
+
+        -- Returns true if the Model is a real player's character.
+local function isPlayerCharacter(model)
+  return Players:GetPlayerFromCharacter(model) ~= nil
+end
+
+        -- Touch Handler
+
+local function onTouched(hit)
+  local enemy = findEnemyModel(hit)
+  if not enemy then return end                 -- ignores objects that are not enemies
+  if isPlayerCharacter(enemy) then return end  -- never harms player characters
+
+        -- Ignores enemies already being eliminated or waiting for their damage cooldown.
+  if enemy:GetAttribute("KillCubeLocked") then return end
+
+  local humanoid = enemy:FindFirstChildOfClass("Humanoid")
+  if not humanoid or humanoid.Health <= 0 then return end
+
+        -- Locks the enemy BEFORE processing damage so another touch is ignored.
+  enemy:SetAttribute("KillCubeLocked", true)
+
+        -- Reads the maze BEFORE the enemy dies and may be cleaned up.
+  local areaName = (EnemyManager and EnemyManager.GetEnemyArea(enemy))
+    or enemy:GetAttribute(CONFIG.AreaAttributeName)
+    or CONFIG.FallbackAreaName
+
+        -- Connects the death event ONCE per enemy.
+        -- When it fires, asks the manager to schedule a delayed check for that maze.
+  if not enemy:GetAttribute("KillCubeDeathHooked") then
+    enemy:SetAttribute("KillCubeDeathHooked", true)
+    humanoid.Died:Once(function()
+      if EnemyManager and areaName then
+        -- The manager waits, then spawns ONLY if below the minimum
+        -- and NEVER above the maximum.
+        EnemyManager.ScheduleReplacementCheck(areaName, CONFIG.RespawnDelay)
+      end
+    end)
+  end
+
+  if CONFIG.InstantKill then
+    humanoid.Health = 0 -- keeps the lock active after instant elimination
+  else
+    humanoid:TakeDamage(CONFIG.DamageAmount)
+        -- Releases the lock after the damage cooldown.
+    task.delay(CONFIG.DamageCooldown, function()
+      if enemy.Parent then
+        enemy:SetAttribute("KillCubeLocked", nil)
+      end
+    end)
+  end
+end
+
+        -- Touch Event Connections
+        -- Connects the handler to the cube itself if it is a BasePart,
+        -- plus every BasePart inside it.
+
+local cube = script.Parent
+local connected = 0
+
+if cube:IsA("BasePart") then
+  cube.Touched:Connect(onTouched)
+  connected += 1
+end
+for _, descendant in ipairs(cube:GetDescendants()) do
+  if descendant:IsA("BasePart") then
+    descendant.Touched:Connect(onTouched)
+    connected += 1
+  end
+end
+
+if connected == 0 then
+  warn("[KillCube] No Parts found under " .. cube:GetFullName() .. ". Script has nothing to monitor.")
+end
