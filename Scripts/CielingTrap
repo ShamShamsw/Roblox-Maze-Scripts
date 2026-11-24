@@ -1,0 +1,303 @@
+        -- Falling Spike Ceiling Trap
+        -- A player steps on the activation pad, which flashes a warning before the ceiling drops.
+        -- Players whose HumanoidRootPart enters the expanded hazard box take damage or die.
+        -- The ceiling waits at the bottom, rises back up, and enters a cooldown.
+        -- Additional touches during the sequence or cooldown do NOT restart the trap.
+
+        -- Workflow
+        -- 1. Insert THIS Script into ServerScriptService.
+
+        -- 2. In Workspace, create the ACTIVATION PAD (a Part).
+        -- Set Anchored = true and CanTouch = true.
+
+        -- 3. In Workspace, create the CEILING (a Model or single Part).
+        -- Place it at its STARTING, raised position.
+        -- Set Anchored = true for ALL its parts.
+        -- Damage detection uses the ceiling's bounding box, expanded by HitMargin.
+        -- Keep the bounding box close to the intended hazard area.
+
+        -- 4. Name the pad and ceiling, then enter their exact names in CONFIG.
+        -- Both objects must be DIRECT children of Workspace.
+
+        -- 5. Set FallDistance so the ceiling stops at the intended height.
+        -- OPTIONAL: Set FloorName to a floor Part's name to limit the drop.
+        -- The floor calculation assumes a level floor and an upright ceiling bounding box.
+
+        -- 6. Edit the remaining CONFIG settings for movement, timing, appearance, and damage.
+
+        -- SECURITY
+        -- Pad detection, ceiling movement, damage, and reset run on the SERVER.
+        -- Server-controlled movement replicates to players.
+        -- There are NO LocalScripts or RemoteEvents.
+
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+        -- Configuration (Change these to fit this specific trap)
+
+local CONFIG = {
+        -- Names of the activation pad and ceiling directly inside Workspace.
+        -- FloorName is OPTIONAL and can identify a Part anywhere inside Workspace.
+  PadName     = "SpikeTrapPad",
+  CeilingName = "SpikeCeiling",
+  FloorName   = nil,                -- e.g. "TrapFloor"; nil = no floor clamp
+
+        -- Movement
+        -- FallDistance is the requested drop distance in studs, straight DOWN.
+        -- FallSpeed and ResetSpeed determine duration from distance / speed.
+        -- Easing changes the movement speed during each tween.
+  FallDistance = 12,
+  FallSpeed    = 40,
+  ResetSpeed   = 8,
+  FallEasing   = Enum.EasingStyle.Quad,
+  ResetEasing  = Enum.EasingStyle.Sine,
+
+        -- Timing
+        -- All durations are measured in seconds.
+  WarningDuration    = 3,           -- warning time before the ceiling drops
+  FlashInterval      = 0.25,        -- wait between pad color changes
+  HoldTime           = 3,           -- time at the bottom after the drop finishes
+  ActivationCooldown = 5,           -- wait after reset before another activation
+
+        -- Pad Appearance
+        -- Alternates between the normal and warning colors while flashing.
+  NormalPadColor  = Color3.fromRGB(120, 120, 120),
+  WarningPadColor = Color3.fromRGB(255, 0, 0),
+
+        -- true = continues flashing through the drop, hold, and rise.
+        -- false = stops flashing after the warning period.
+  FlashUntilReset = true,
+
+        -- Damage
+        -- Damage is active during the drop and the hold at the bottom.
+        -- DamageWhileRising optionally keeps damage active during the return.
+  InstantKill   = false,            -- true = sets a detected player's health to zero
+  DamageAmount  = 50,               -- used only when InstantKill = false
+  DamageCooldown = 1,               -- minimum seconds between damage hits per player
+  HitMargin     = 1.5,              -- studs added to EACH side of the hazard box
+  DamageWhileRising = false,
+}
+
+        -- Setup & Validation
+        -- Waits for the pad and ceiling directly inside Workspace.
+        -- Stops with a warning if either is missing or the pad is not a BasePart.
+
+local pad     = workspace:WaitForChild(CONFIG.PadName, 15)
+local ceiling = workspace:WaitForChild(CONFIG.CeilingName, 15)
+if not pad or not ceiling then
+  warn("[SpikeCeiling] Pad or ceiling not found in Workspace. Trap disabled.")
+  return
+end
+if not pad:IsA("BasePart") then
+  warn("[SpikeCeiling] Pad must be a Part. Trap disabled.")
+  return
+end
+
+        -- Anchors 'instance' itself if it is a BasePart, plus all descendant BaseParts.
+        -- Keeps the ceiling's parts fixed under physics while the script moves them.
+local function anchorAll(instance)
+  if instance:IsA("BasePart") then
+    instance.Anchored = true
+  end
+  for _, d in ipairs(instance:GetDescendants()) do
+    if d:IsA("BasePart") then
+      d.Anchored = true
+    end
+  end
+end
+anchorAll(ceiling)
+
+        -- Returns the ceiling's oriented bounding box as a CFrame and Size.
+        -- Uses GetBoundingBox for a Model, or CFrame and Size for a single Part.
+local function getHazardBox()
+  if ceiling:IsA("Model") then
+    return ceiling:GetBoundingBox()
+  end
+  return ceiling.CFrame, ceiling.Size
+end
+
+        -- Position Calculation
+        -- Records the ceiling's starting position and orientation ONCE.
+
+local startPivot = ceiling:GetPivot()
+
+        -- Optionally reduces the drop using the ceiling bottom and floor top.
+        -- This calculation uses their Y positions and heights; it does NOT account for tilt.
+local fallDistance = CONFIG.FallDistance
+if CONFIG.FloorName then
+  local floor = workspace:FindFirstChild(CONFIG.FloorName, true)
+  if floor and floor:IsA("BasePart") then
+    local boxCF, boxSize = getHazardBox()
+    local ceilingBottomY = boxCF.Position.Y - boxSize.Y / 2
+    local floorTopY = floor.Position.Y + floor.Size.Y / 2
+    local maxFall = math.max(ceilingBottomY - floorTopY, 0)
+    if fallDistance > maxFall then
+      warn("[SpikeCeiling] FallDistance reduced from " .. fallDistance .. " to " .. maxFall .. " so the ceiling stays above the floor.")
+      fallDistance = maxFall
+    end
+  else
+    warn("[SpikeCeiling] FloorName '" .. CONFIG.FloorName .. "' not found; no floor clamp applied.")
+  end
+end
+
+        -- Moves the target position DOWN in world space while preserving orientation.
+local fallenPivot = startPivot - Vector3.new(0, fallDistance, 0)
+
+        -- Applies the configured normal color during initialization.
+pad.Color = CONFIG.NormalPadColor
+
+        -- State
+        -- "Idle" = ready for activation.
+        -- "Starting" = activation locked; waiting for the sequence task to begin.
+        -- "Running" = warning, drop, hold, rise, or cleanup.
+        -- "Cooldown" = waiting before another activation is allowed.
+
+local state = "Idle"
+local hazardActive = false    -- true while damage detection is enabled
+local isFlashing = false      -- true while the pad should continue flashing
+local lastHit = {}            -- lastHit[player] = os.clock() of their last damage hit
+
+        -- Movement
+        -- Smoothly moves the ceiling to 'targetCFrame'.
+        -- Tweens a CFrameValue and applies each update using PivotTo.
+
+local function tweenPivot(targetCFrame, duration, easingStyle)
+  local cfValue = Instance.new("CFrameValue")
+  cfValue.Value = ceiling:GetPivot()
+  local connection = cfValue.Changed:Connect(function(newCFrame)
+    ceiling:PivotTo(newCFrame)
+  end)
+  local tween = TweenService:Create(
+    cfValue,
+    TweenInfo.new(math.max(duration, 0.01), easingStyle, Enum.EasingDirection.InOut),
+    { Value = targetCFrame }
+  )
+  tween:Play()
+  tween.Completed:Wait()
+  connection:Disconnect()
+  cfValue:Destroy()
+  ceiling:PivotTo(targetCFrame) -- snaps to the exact target position and orientation
+end
+
+        -- Pad Flashing
+        -- Alternates pad colors in a separate task while isFlashing is true.
+
+local function startFlashing()
+  isFlashing = true
+  task.spawn(function()
+    local showWarning = true
+    while isFlashing do
+      pad.Color = showWarning and CONFIG.WarningPadColor or CONFIG.NormalPadColor
+      showWarning = not showWarning
+      task.wait(CONFIG.FlashInterval)
+    end
+        -- Restores the normal color when the flashing loop ends.
+    pad.Color = CONFIG.NormalPadColor
+  end)
+end
+
+        -- Damage Detection
+        -- Checks players on every server Heartbeat while hazardActive is true.
+        -- Tests each living player's HumanoidRootPart position, NOT their entire character.
+        -- NPCs are not included in this player-only check.
+
+RunService.Heartbeat:Connect(function()
+  if not hazardActive then return end
+
+  local boxCF, boxSize = getHazardBox()
+  local half = boxSize / 2 + Vector3.new(CONFIG.HitMargin, CONFIG.HitMargin, CONFIG.HitMargin)
+
+  for _, player in ipairs(Players:GetPlayers()) do
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+
+    if humanoid and root and humanoid.Health > 0 then
+        -- Converts the root position into the hazard box's local space.
+        -- Checks whether it falls within the box expanded by HitMargin.
+      local rel = boxCF:PointToObjectSpace(root.Position)
+      if math.abs(rel.X) <= half.X and math.abs(rel.Y) <= half.Y and math.abs(rel.Z) <= half.Z then
+        if CONFIG.InstantKill then
+          humanoid.Health = 0
+        else
+          local now = os.clock()
+          if not lastHit[player] or now - lastHit[player] >= CONFIG.DamageCooldown then
+            lastHit[player] = now
+            humanoid:TakeDamage(CONFIG.DamageAmount)
+          end
+        end
+      end
+    end
+  end
+end)
+
+        -- Removes a player's stored damage timestamp when they leave.
+Players.PlayerRemoving:Connect(function(player)
+  lastHit[player] = nil
+end)
+
+        -- Trap Sequence
+        -- Runs the warning, drop, hold, and return in order.
+
+local function runSequence()
+        -- 1. WARNING: Flashes the pad before activating damage and movement.
+  startFlashing()
+  task.wait(CONFIG.WarningDuration)
+  if not CONFIG.FlashUntilReset then
+    isFlashing = false
+  end
+
+        -- 2. FALL: Enables damage and moves the ceiling to its lower endpoint.
+  hazardActive = true
+  tweenPivot(fallenPivot, fallDistance / math.max(CONFIG.FallSpeed, 0.1), CONFIG.FallEasing)
+
+        -- 3. HOLD: Keeps the ceiling at the bottom with damage still active.
+  task.wait(CONFIG.HoldTime)
+
+        -- 4. RISE: Returns the ceiling to its starting position.
+        -- Damage remains active ONLY if DamageWhileRising is true.
+  hazardActive = CONFIG.DamageWhileRising
+  tweenPivot(startPivot, fallDistance / math.max(CONFIG.ResetSpeed, 0.1), CONFIG.ResetEasing)
+end
+
+        -- Runs the sequence, then performs cleanup and waits through the cooldown.
+local function runTrap()
+  state = "Running"
+
+        -- Catches sequence errors so cleanup can still be attempted.
+  local ok, err = pcall(runSequence)
+  if not ok then
+    warn("[SpikeCeiling] Sequence error:", err)
+  end
+
+        -- Disables damage and flashing after the sequence finishes or raises an error.
+        -- Attempts to restore the ceiling and pad to their starting appearance.
+  hazardActive = false
+  isFlashing = false
+  ceiling:PivotTo(startPivot)     -- restores the starting position and orientation
+  pad.Color = CONFIG.NormalPadColor
+
+  state = "Cooldown"
+  task.wait(CONFIG.ActivationCooldown)
+  state = "Idle"
+end
+
+        -- Pad Detection
+        -- Accepts touches from living player characters while the trap is Idle.
+
+pad.Touched:Connect(function(hit)
+        -- Ignores touches during startup, the sequence, and cooldown.
+  if state ~= "Idle" then return end
+
+  local character = hit:FindFirstAncestorOfClass("Model")
+  if not character then return end
+  local player = Players:GetPlayerFromCharacter(character)
+  if not player then return end
+  local humanoid = character:FindFirstChildOfClass("Humanoid")
+  if not humanoid or humanoid.Health <= 0 then return end
+
+        -- Locks activation BEFORE starting the task to prevent duplicate sequences.
+  state = "Starting"
+  task.spawn(runTrap)
+end)
