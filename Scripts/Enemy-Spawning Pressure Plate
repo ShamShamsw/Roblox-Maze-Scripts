@@ -31,7 +31,7 @@ local Players             = game:GetService("Players")
 local ServerStorage       = game:GetService("ServerStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
-        --- Configuration (Change these to fit this specific plate)
+        -- Configuration (Change these to fit this specific plate)
 
 local CONFIG = {
         -- Name of the enemy Model inside ServerStorage.
