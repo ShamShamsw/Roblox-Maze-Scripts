@@ -1,0 +1,247 @@
+        -- PushBlockOffPlate Door Script
+        -- A movable block starts ON a green pressure plate.
+        -- Detection is done with Server-side requests instead of Touched, because Touched stops firing once a block is resting.
+        -- Detection is done with Server-side requests instead of Touched, because Touched stops firing once a block is resting.
+
+        -- Workflow
+        -- 1. Insert THIS Script into ServerScriptService.
+        -- One script can manage multiple puzzles.
+
+        -- 2. In Workspace, create/choose a Part to be the GREEN PRESSURE PLATE.
+        -- Set Anchored = true.
+
+        -- 3. In Workspace, create the PUSHABLE BLOCK (a Part or Model).
+        -- Place it ON the plate.
+        -- Set Anchored = false for every part of the block so players can push it.
+        -- For a multi-part Model, weld its parts together so they move as ONE block.
+        -- For best detection accuracy, use blocks that stay axis-aligned (do not rotate).
+
+        -- 4. In Workspace, create the DOOR, BARRIER, or BRIDGE (a Part or Model).
+        -- Set Anchored = true for ALL its parts.
+        -- When activated, it will slide by the distance and direction defined by MoveOffset.
+
+        -- 5. Give the plate, block, and moving object distinct names.
+        -- Enter those exact names in the matching fields inside PUZZLES below.
+
+        -- 6. To add MORE puzzles, copy one {...} entry inside PUZZLES.
+        -- Update the object names and MoveOffset for each new puzzle.
+        -- You do NOT need to copy the entire script.
+
+        -- SECURITY
+        -- All plate and block detection runs on the SERVER.
+        -- There are NO RemoteEvents or LocalScripts for clients to report false plate states.
+        -- NOTE: Client-controlled physics can still affect how unanchored blocks move.
+
+
+local TweenService = game:GetService("TweenService")
+
+        -- Configuration (Change these to fit these specific conditions)
+        -- Recommended to keep it simple: one entry per entrance/exit.
+
+local PUZZLES = {
+  {
+    PlateName     = "GreenPlate1",   -- the green pressure plate (Part)
+    BlockName     = "PushBlock1",    -- the movable block (Part or Model)
+    MechanismName = "Door1",         -- door / barrier / bridge (Part or Model)
+
+        -- Size of the invisible detection box extending above and slightly into the plate.
+        -- nil = automatic (plate width/depth reduced by 0.4 studs, with a minimum of 0.1).
+        -- The smaller footprint can count the block as "off" BEFORE it fully clears the plate.
+        -- Detection uses part BOUNDING BOXES, not exact visible geometry.
+    DetectionSize   = nil,           -- or e.g. Vector3.new(6, 6, 6)
+    DetectionHeight = 6,             -- used only when DetectionSize is nil
+
+        -- How the mechanism moves (world-space offset from its start).
+        -- Example: (0, 12, 0) = door rises 12 studs.
+    MoveOffset   = Vector3.new(0, 12, 0),
+    MoveDuration = 2,                -- seconds to open
+    EasingStyle  = Enum.EasingStyle.Quad,
+
+        -- true = stays open for the remainder of this server session.
+        -- false = waits ResetDelay seconds AFTER opening finishes, then closes.
+        -- After closing, waits to detect the block on the plate again.
+    StaysActivated = true,
+    ResetDelay     = 5,              -- only used if StaysActivated = false
+    ResetDuration  = 2,              -- seconds to close again
+
+    PollInterval = 0.1,              -- seconds between checks, excluding movement and reset waits
+  },
+
+        -- Example of a second door (remove or edit):
+        -- {
+        --     PlateName = "GreenPlate2", BlockName = "PushBlock2", MechanismName = "Door2",
+        --     DetectionSize = nil, DetectionHeight = 6,
+        --     MoveOffset = Vector3.new(0, 0, 15), MoveDuration = 3,
+        --     EasingStyle = Enum.EasingStyle.Sine,
+        --     StaysActivated = false, ResetDelay = 8, ResetDuration = 3,
+        --     PollInterval = 0.1,
+        -- },
+}
+
+        -- Helper Functions
+        -- Waits up to 'timeout' seconds for an object with the specified name
+        -- to appear anywhere in Workspace.
+        -- If no matching object is found, logs a warning and returns nil.
+
+local function waitForObject(name, timeout)
+  local deadline = os.clock() + timeout
+  while os.clock() < deadline do
+    local found = workspace:FindFirstChild(name, true)
+    if found then
+      return found
+    end
+    task.wait(0.25)
+  end
+  warn("[BlockPuzzle] Could not find '" .. name .. "' in Workspace.")
+  return nil
+end
+
+        -- Smoothly moves a Part OR Model to 'targetCFrame'.
+        -- Tweens a CFrameValue and applies each update using PivotTo.
+        -- All parts move together, preserving their relative positions and orientations.
+
+local function tweenPivot(instance, targetCFrame, duration, easingStyle)
+  local cfValue = Instance.new("CFrameValue")
+  cfValue.Value = instance:GetPivot()
+
+        -- Updates the object's position and orientation whenever the value changes.
+  local connection = cfValue.Changed:Connect(function(newCFrame)
+    if instance.Parent then
+      instance:PivotTo(newCFrame)
+    end
+  end)
+
+  local tween = TweenService:Create(
+    cfValue,
+    TweenInfo.new(duration, easingStyle, Enum.EasingDirection.InOut),
+    { Value = targetCFrame }
+  )
+  tween:Play()
+  tween.Completed:Wait()
+
+  connection:Disconnect()
+  cfValue:Destroy()
+
+        -- Snaps to the exact target position and orientation to prevent misalignment.
+  if instance.Parent then
+    instance:PivotTo(targetCFrame)
+  end
+end
+
+        -- Anchors 'instance' itself if it is a BasePart, plus all descendant BaseParts. -- Logs one warning for EACH part that was not already anchored.
+local function ensureAnchored(instance)
+  local parts = {}
+  if instance:IsA("BasePart") then
+    table.insert(parts, instance)
+  end
+  for _, d in ipairs(instance:GetDescendants()) do
+    if d:IsA("BasePart") then
+      table.insert(parts, d)
+    end
+  end
+  for _, part in ipairs(parts) do
+    if not part.Anchored then
+      warn("[BlockPuzzle] '" .. part.Name .. "' in the mechanism was not Anchored. Anchoring it.")
+      part.Anchored = true
+    end
+  end
+end
+
+-- MAIN LOGIC
+
+local function runPuzzle(cfg)
+        -- Locates the plate, pushable block, and moving object.
+  local plate     = waitForObject(cfg.PlateName, 10)
+  local block     = waitForObject(cfg.BlockName, 10)
+  local mechanism = waitForObject(cfg.MechanismName, 10)
+  if not (plate and block and mechanism) then
+    warn("[BlockPuzzle] Puzzle for '" .. cfg.MechanismName .. "' disabled (missing objects).")
+    return
+  end
+  if not plate:IsA("BasePart") then
+    warn("[BlockPuzzle] Plate must be a Part.")
+    return
+  end
+
+  ensureAnchored(mechanism)
+
+        -- Stores the mechanism's starting and target positions and orientations.
+  local closedPivot = mechanism:GetPivot()
+  local openPivot   = closedPivot + cfg.MoveOffset -- CFrame + Vector3 keeps rotation
+
+        -- Defines the detection box's size and position just above the plate's top surface.
+  local boxSize = cfg.DetectionSize or Vector3.new(
+    math.max(plate.Size.X - 0.4, 0.1),
+    cfg.DetectionHeight,
+    math.max(plate.Size.Z - 0.4, 0.1)
+  )
+        -- The -0.25 offset extends the detection box slightly into the plate.
+        -- This helps detect a block resting directly on the plate's surface.
+  local boxCFrame = plate.CFrame * CFrame.new(0, plate.Size.Y / 2 + boxSize.Y / 2 - 0.25, 0)
+
+        -- Filters the overlap query to detect ONLY the designated block.
+        -- Players, enemies, and all other objects are ignored.
+  local params = OverlapParams.new()
+  params.FilterType = Enum.RaycastFilterType.Include
+  params.FilterDescendantsInstances = { block }
+
+        -- Returns true when the overlap query finds at least ONE eligible part -- of the designated block whose bounding box overlaps the detection box.
+  local function isBlockOnPlate()
+    local hits = workspace:GetPartBoundsInBox(boxCFrame, boxSize, params)
+    return #hits > 0
+  end
+
+        -- STATE MACHINE
+        -- "WaitingForBlock" = Waiting to detect the block, initially or after a reset.
+        -- "Armed" = The block was detected; waiting for it to leave the detection box.
+        -- After activation, the mechanism either stays open for this server session or resets.
+  local state = "WaitingForBlock"
+
+  if not isBlockOnPlate() then
+    warn("[BlockPuzzle] '" .. cfg.BlockName .. "' is not on '" .. cfg.PlateName ..
+      "' at start. The door stays shut until the block is placed on the plate.")
+  end
+
+  while true do
+    task.wait(cfg.PollInterval)
+
+        -- Logs a warning and stops if the block or plate no longer has a parent.
+    if not block.Parent or not plate.Parent then
+      warn("[BlockPuzzle] Block or plate removed. Stopping this puzzle.")
+      return
+    end
+
+    local occupying = isBlockOnPlate()
+
+    if state == "WaitingForBlock" then
+        -- Requires the block to be detected on the plate BEFORE activation can occur.
+      if occupying then
+        state = "Armed"
+      end
+
+    elseif state == "Armed" then
+      -- Activates only when the query detects NO overlap with the designated block. 
+      -- Any remaining detected overlap with the detection box prevents activation.
+      if not occupying then
+        -- Opens the mechanism and pauses polling until movement finishes.
+        -- This also prevents duplicate activations during movement.
+        tweenPivot(mechanism, openPivot, cfg.MoveDuration, cfg.EasingStyle)
+
+        if cfg.StaysActivated then
+          return -- stops monitoring this puzzle for the rest of this script run
+        end
+
+        -- Resets after a timed delay: waits, closes the mechanism,
+        -- then waits for the block to be detected on the plate again.
+        task.wait(cfg.ResetDelay)
+        tweenPivot(mechanism, closedPivot, cfg.ResetDuration, cfg.EasingStyle)
+        state = "WaitingForBlock"
+      end
+    end
+  end
+end
+
+        -- Starts each configured puzzle in a separate thread.
+for _, puzzleConfig in ipairs(PUZZLES) do
+  task.spawn(runPuzzle, puzzleConfig)
+end
