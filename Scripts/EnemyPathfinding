@@ -1,0 +1,341 @@
+        -- Enemy Pathfinding AI
+        -- Detects the nearest valid player within DetectionRadius and begins chasing them.
+        -- Uses PathfindingService to navigate, with direct movement as a fallback.
+        -- Keeps chasing the selected player until they become invalid or exceed LoseTargetRadius.
+        -- Optionally returns to its recorded starting position after losing the target.
+        -- Checks all players when selecting a target; it does NOT switch to a closer player mid-chase.
+
+        -- Workflow
+        -- 1. Open your enemy Model in ServerStorage.
+        -- It needs a Humanoid and a BasePart named "HumanoidRootPart".
+        -- Keep its movement assembly UNANCHORED and properly connected.
+
+        -- 2. Insert THIS Script INSIDE the enemy Model (script.Parent = model).
+        -- Each cloned enemy carries its own copy of this script.
+
+        -- 3. Edit the CONFIG table below.
+        -- Match the pathfinding agent settings to your NPC's size and movement abilities.
+
+        -- 4. Position the enemy at its intended spawn location BEFORE this script starts running.
+        -- The script records HumanoidRootPart.Position ONCE during initialization.
+        -- That recorded position becomes its return destination.
+
+        -- 5. OPTIONAL: Add sounds, animations, or other behavior inside the HOOK functions.
+        -- These functions are intentionally empty.
+
+        -- SECURITY
+        -- AI decisions and movement commands run on the SERVER.
+        -- The script attempts to assign the root part's physics assembly to the server.
+        -- Ownership errors are caught, but successful ownership is NOT verified.
+        -- Server ownership reduces client control of NPC physics; it is NOT complete exploit protection.
+        -- Avoid exposing unrestricted enemy movement controls through RemoteEvents.
+
+local Players            = game:GetService("Players")
+local PathfindingService = game:GetService("PathfindingService")
+
+        -- Configuration (Change these to fit this specific enemy)
+
+local CONFIG = {
+        -- Detection distances, measured in studs.
+        -- Selects the nearest valid player at or within DetectionRadius.
+        -- Keep LoseTargetRadius GREATER THAN OR EQUAL TO DetectionRadius.
+  DetectionRadius  = 40,   -- maximum distance for acquiring a target
+  LoseTargetRadius = 60,   -- loses the current target beyond this distance
+
+        -- Movement behavior.
+        -- ReturnToSpawn = true attempts to walk home after losing the target.
+        -- SpawnReachedDistance uses straight-line distance, INCLUDING height.
+  ReturnToSpawn = true,
+  SpawnReachedDistance = 5,
+  ChaseWalkSpeed  = 16,    -- Humanoid.WalkSpeed while chasing
+  ReturnWalkSpeed = 12,    -- Humanoid.WalkSpeed assigned when a target is lost
+
+        -- Timing and path recalculation.
+        -- UpdateInterval is the wait AFTER each AI step, not a guaranteed update rate.
+        -- PathRecalcInterval limits how frequently path calculations can begin again
+        -- after the previous calculation finished.
+        -- After that interval, recalculates if the path is missing, exhausted,
+        -- or the destination has moved at least PathRecalcDistance studs.
+  UpdateInterval = 0.15,
+  PathRecalcInterval = 0.75,
+  PathRecalcDistance = 6,
+
+        -- Horizontal distance, in studs, for advancing to the next waypoint.
+        -- Height differences are NOT included in this arrival check.
+  WaypointReachedDistance = 4,
+
+        -- Pathfinding agent settings (match your NPC's size and abilities).
+        -- Radius, height, and waypoint spacing are measured in studs.
+  AgentRadius = 2,
+  AgentHeight = 5,
+  AgentCanJump = true,
+  AgentCanClimb = false,
+  WaypointSpacing = 4,
+}
+
+        -- Setup & Validation
+        -- Uses the script's parent as the enemy.
+        -- Stops with a warning if either required component is missing.
+
+local enemy = script.Parent
+local humanoid = enemy:FindFirstChildOfClass("Humanoid")
+local rootPart = enemy:FindFirstChild("HumanoidRootPart")
+
+if not humanoid or not rootPart then
+  warn("[EnemyAI] '" .. enemy.Name .. "' needs a Humanoid and a HumanoidRootPart. AI disabled.")
+  return
+end
+
+        -- Attempts to keep the root part's physics assembly under SERVER ownership.
+        -- pcall catches ownership errors, including those caused by anchored assemblies.
+pcall(function()
+  rootPart:SetNetworkOwner(nil)
+end)
+
+        -- Records the return position ONCE, when initialization reaches this line.
+local spawnPosition = rootPart.Position
+
+        -- Optional Hooks
+        -- Add custom behavior inside these functions.
+        -- Keep hooks brief; yielding here delays the current AI step.
+
+local function OnPlayerDetected(player)
+        -- Runs whenever a player is selected as a NEW chase target.
+        -- Example: play a detection sound.
+end
+
+local function OnChaseStart(player)
+        -- Runs after the target, chase state, and chase speed are assigned.
+        -- Example: start a run animation.
+end
+
+local function OnPathCalculated(success, destination)
+        -- Runs after each path computation attempt that reaches this hook.
+        -- 'success' indicates whether a usable path was found.
+        -- 'destination' is the world-space position used for that attempt.
+        -- Failed attempts clear the path so movement falls back to a direct approach.
+end
+
+local function OnTargetLost(player)
+        -- Runs when the current target becomes invalid or exceeds LoseTargetRadius.
+        -- Invalid targets include missing characters, missing required parts, or dead Humanoids.
+end
+
+local function OnReturnedToSpawn()
+        -- Runs when the returning enemy is within SpawnReachedDistance of its recorded position.
+end
+
+        -- State
+        -- Tracks the current behavior, selected target, and path progress.
+
+local state = "Idle"          -- "Idle", "Chasing", or "Returning"
+local target = nil            -- Player currently being chased
+local waypoints = nil         -- waypoints from the most recent successful path
+local waypointIndex = 1       -- index of the next waypoint to follow
+local lastPathTime = 0        -- os.clock() recorded after the last path computation attempt
+local lastPathDestination = nil -- destination used for the last path computation attempt
+
+        -- Helper Functions
+
+        -- Returns true if the player has a character, a HumanoidRootPart,
+        -- and a Humanoid with health GREATER THAN zero.
+local function isValidTarget(player)
+  local character = player and player.Character
+  if not character then return false end
+  local hum = character:FindFirstChildOfClass("Humanoid")
+  local hrp = character:FindFirstChild("HumanoidRootPart")
+  return hum ~= nil and hrp ~= nil and hum.Health > 0
+end
+
+        -- Returns the straight-line distance to the player's HumanoidRootPart.
+        -- Assumes the player's character and root part already exist.
+local function distanceTo(player)
+  return (player.Character.HumanoidRootPart.Position - rootPart.Position).Magnitude
+end
+
+        -- Checks all players and returns the nearest valid target within 'radius'.
+        -- Includes players exactly at the radius; returns nil if none qualify.
+local function findNearestPlayer(radius)
+  local nearest, nearestDistance = nil, radius
+  for _, player in ipairs(Players:GetPlayers()) do
+    if isValidTarget(player) then
+      local d = distanceTo(player)
+      if d <= nearestDistance then
+        nearest, nearestDistance = player, d
+      end
+    end
+  end
+  return nearest
+end
+
+        -- Attempts to calculate a path from the enemy to 'destination'.
+        -- Stores the resulting waypoints and returns true on success.
+        -- Otherwise, clears the stored path and returns false.
+local function computePath(destination)
+  local path = PathfindingService:CreatePath({
+    AgentRadius = CONFIG.AgentRadius,
+    AgentHeight = CONFIG.AgentHeight,
+    AgentCanJump = CONFIG.AgentCanJump,
+    AgentCanClimb = CONFIG.AgentCanClimb,
+    WaypointSpacing = CONFIG.WaypointSpacing,
+  })
+
+        -- ComputeAsync can raise an error; pcall catches it.
+  local ok, err = pcall(function()
+    path:ComputeAsync(rootPart.Position, destination)
+  end)
+
+  lastPathTime = os.clock()
+  lastPathDestination = destination
+
+  local success = ok and path.Status == Enum.PathStatus.Success
+  if success then
+    waypoints = path:GetWaypoints()
+    waypointIndex = 2 -- skips the first waypoint, which represents the path's start
+  else
+    waypoints = nil   -- allows direct movement toward the destination
+    waypointIndex = 1
+    if not ok then
+      warn("[EnemyAI] Path error:", err)
+    end
+  end
+
+  OnPathCalculated(success, destination)
+  return success
+end
+
+        -- Returns true when the recalculation interval has elapsed AND
+        -- the path is missing, exhausted, or its destination has moved far enough.
+        -- Does NOT independently detect a blocked path or a stuck NPC.
+local function shouldRecompute(destination)
+        -- Waits at least PathRecalcInterval after the previous computation attempt.
+  if os.clock() - lastPathTime < CONFIG.PathRecalcInterval then
+    return false
+  end
+        -- Requests a new path if none exists or all waypoints have been passed.
+  if waypoints == nil or waypointIndex > #waypoints then
+    return true
+  end
+        -- Requests a new path if the destination has moved far enough.
+  if lastPathDestination == nil or (destination - lastPathDestination).Magnitude >= CONFIG.PathRecalcDistance then
+    return true
+  end
+  return false
+end
+
+        -- Moves toward the current waypoint and requests jumps when specified.
+        -- If no waypoint is available, moves directly toward 'destination'.
+local function moveAlongPath(destination)
+  if waypoints and waypoints[waypointIndex] then
+    local waypoint = waypoints[waypointIndex]
+
+        -- Measures ONLY horizontal distance for the waypoint arrival check.
+        -- Vertical separation does not prevent advancing to the next waypoint.
+    local flat = Vector3.new(
+      waypoint.Position.X - rootPart.Position.X,
+      0,
+      waypoint.Position.Z - rootPart.Position.Z
+    ).Magnitude
+
+    if flat <= CONFIG.WaypointReachedDistance then
+      waypointIndex += 1
+      waypoint = waypoints[waypointIndex]
+    end
+
+    if waypoint then
+      if waypoint.Action == Enum.PathWaypointAction.Jump then
+        humanoid.Jump = true
+      end
+      humanoid:MoveTo(waypoint.Position)
+      return
+    end
+  end
+        -- No available waypoint: attempts a direct approach.
+        -- Direct movement does NOT calculate a route around obstacles.
+  humanoid:MoveTo(destination)
+end
+
+        -- Selects the chase target, clears the previous path, and sets chase speed.
+        -- Calls the detection hook first and the chase-start hook afterward.
+local function beginChase(player)
+  OnPlayerDetected(player)
+  target = player
+  state = "Chasing"
+  waypoints = nil
+  humanoid.WalkSpeed = CONFIG.ChaseWalkSpeed
+  OnChaseStart(player)
+end
+
+        -- AI Step
+        -- Runs one decision cycle for the current state.
+        -- "Idle" = searches for a target.
+        -- "Chasing" = follows the selected target until it is lost.
+        -- "Returning" = attempts to reach the recorded spawn position.
+
+local function step()
+  if state == "Idle" then
+        -- Selects the nearest valid player within DetectionRadius.
+    local player = findNearestPlayer(CONFIG.DetectionRadius)
+    if player then
+      beginChase(player)
+    end
+
+  elseif state == "Chasing" then
+        -- Loses the target if it becomes invalid or exceeds LoseTargetRadius.
+        -- Then switches to Returning or Idle, depending on ReturnToSpawn.
+    if not isValidTarget(target) or distanceTo(target) > CONFIG.LoseTargetRadius then
+      local lostPlayer = target
+      target = nil
+      waypoints = nil
+      OnTargetLost(lostPlayer)
+      state = CONFIG.ReturnToSpawn and "Returning" or "Idle"
+      humanoid.WalkSpeed = CONFIG.ReturnWalkSpeed
+      return
+    end
+
+    local destination = target.Character.HumanoidRootPart.Position
+    if shouldRecompute(destination) then
+      computePath(destination)
+    end
+    moveAlongPath(destination)
+
+  elseif state == "Returning" then
+        -- Interrupts the return trip if a valid player enters detection range.
+        -- Selects the nearest qualifying player and starts a new chase.
+    local player = findNearestPlayer(CONFIG.DetectionRadius)
+    if player then
+      beginChase(player)
+      return
+    end
+
+        -- Counts the enemy as home when it is within SpawnReachedDistance.
+        -- Switches to Idle and calls the return hook.
+    if (rootPart.Position - spawnPosition).Magnitude <= CONFIG.SpawnReachedDistance then
+      state = "Idle"
+      waypoints = nil
+      OnReturnedToSpawn()
+      return
+    end
+
+    if shouldRecompute(spawnPosition) then
+      computePath(spawnPosition)
+    end
+    moveAlongPath(spawnPosition)
+  end
+end
+
+        -- Main Loop
+        -- Repeats while the Humanoid is alive and the enemy has a parent.
+        -- These conditions are checked BEFORE each iteration.
+        -- Removing the enemy from Workspace alone does not stop the loop
+        -- if the enemy still has a parent elsewhere.
+
+while humanoid.Health > 0 and enemy.Parent do
+        -- Catches errors raised during this AI step and logs a warning.
+        -- The loop then waits before attempting another step.
+  local ok, err = pcall(step)
+  if not ok then
+    warn("[EnemyAI] Error:", err)
+  end
+  task.wait(CONFIG.UpdateInterval)
+end
