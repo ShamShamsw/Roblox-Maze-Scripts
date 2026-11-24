@@ -1,0 +1,126 @@
+        -- Moving Spike Wall Trap
+        -- When a player enters the trigger area, a warning sound plays before the wall moves.
+        -- The spike wall slides to its endpoint, waits, then returns to its starting position.
+        -- Active spikes damage or eliminate players.
+        -- A cooldown prevents immediate reactivation after the wall returns.
+        -- Players are NOT damaged while the wall is inactive.
+        -- Return movement only causes damage if DamageWhileResetting is enabled.
+
+        -- Workflow
+        -- 1. Insert THIS Script into ServerScriptService.
+
+        -- 2. In Workspace, create the SPIKE WALL (a Model or Part).
+        -- Set Anchored = true for ALL its parts.
+        -- Place the wall at its STARTING position.
+
+        -- 3. In Workspace, create the TRIGGER AREA (a Part).
+        -- Set Anchored = true.
+        -- Usually, set Transparency = 1 and CanCollide = false.
+        -- The trigger should be tall enough to contain a player's HumanoidRootPart.
+        -- The script also sets CanCollide = false.
+
+        -- 4. Choose the wall's END position using ONE of these options:
+        -- A. Create a marker Part and enter its name in CONFIG.EndMarkerName.
+        -- Its Position defines the endpoint; the wall keeps its starting orientation.
+        -- B. Set EndMarkerName = nil and configure MoveOffset.
+        -- MoveOffset defines a world-space displacement from the starting position.
+
+        -- 5. OPTIONAL: Add Sound objects named "WarningSound" and "ActivationSound".
+        -- Place them inside the wall Model or elsewhere in Workspace.
+        -- Set their SoundIds. Missing sounds are skipped.
+
+        -- 6. Edit CONFIG, then press Play.
+
+        -- SECURITY
+        -- Trigger detection, movement, and damage run on the SERVER.
+        -- There are NO LocalScripts or RemoteEvents for clients to control the trap.
+
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+        -- Configuration (Change these to fit this specific trap)
+
+local CONFIG = {
+        -- Names of the spike wall and trigger area in Workspace.
+  WallName    = "SpikeWall",          -- Model or Part
+  TriggerName = "SpikeWallTrigger",   -- Part
+
+        -- Endpoint
+        -- Set EndMarkerName to the endpoint marker Part's name.
+        -- Set it to nil to use MoveOffset instead.
+  EndMarkerName = "SpikeWallEnd",
+  MoveOffset    = Vector3.new(0, 0, 60), -- world-space studs from the start
+
+        -- Movement & Timing
+  MoveSpeed   = 30,                   -- studs per second toward the endpoint
+  ReturnSpeed = 10,                   -- studs per second back to the start
+  EndWaitTime = 2,                    -- seconds spent waiting at the endpoint
+  WarningDuration = 1.5,              -- seconds between activation and movement
+
+        -- Seconds after returning to the start before another activation is allowed.
+  ActivationCooldown = 5,
+
+        -- Damage
+  InstantKill   = true,               -- true = instant death
+  DamageAmount  = 40,                 -- used only when InstantKill = false
+  DamageCooldown = 1,                 -- seconds between damage hits per player
+  HitMargin     = 1.5,                -- additional hazard detection margin, in studs
+end
+
+        -- Trap Execution
+        -- Runs the sequence, attempts cleanup, then waits through the cooldown.
+
+local function runTrap()
+  state = "Running"
+
+        -- Catches sequence errors so cleanup can still be attempted.
+  local ok, err = pcall(runSequence)
+  if not ok then
+    warn("[SpikeWall] Sequence error:", err)
+  end
+
+        -- Disables damage and attempts to restore the wall's starting position and orientation.
+  hazardActive = false
+  wall:PivotTo(startPivot)
+
+  state = "Cooldown"
+  task.wait(CONFIG.ActivationCooldown)
+  state = "Idle"
+end
+
+        -- Trigger Detection
+        -- Uses SERVER-SIDE polling, including when a player stands still inside the area.
+        -- Returns true if a living player's HumanoidRootPart is inside the trigger box.
+        -- Checks the root position, NOT overlap with the player's entire character.
+
+local function isPlayerInTrigger()
+  local half = trigger.Size / 2
+  for _, player in ipairs(Players:GetPlayers()) do
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if humanoid and root and humanoid.Health > 0 then
+      local rel = trigger.CFrame:PointToObjectSpace(root.Position)
+      if math.abs(rel.X) <= half.X and math.abs(rel.Y) <= half.Y and math.abs(rel.Z) <= half.Z then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+        -- Trigger Polling
+        -- Repeats while the wall and trigger each have a parent.
+        -- A player remaining inside can reactivate the trap after it returns to Idle.
+
+task.spawn(function()
+  while wall.Parent and trigger.Parent do
+        -- Starts ONLY while Idle; Running and Cooldown prevent repeat activations.
+    if state == "Idle" and isPlayerInTrigger() then
+      state = "Running" -- locks activation BEFORE starting the sequence task
+      task.spawn(runTrap)
+    end
+    task.wait(CONFIG.TriggerPollInterval)
+  end
+end)
